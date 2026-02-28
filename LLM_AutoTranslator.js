@@ -77,9 +77,18 @@
  * @desc 翻译创造性程度(0=保守,1=创意)
  * @type number
  * @min 0
- * @max 1
+ * @max 2
  * @decimals 2
  * @default 0.3
+ * 
+ * @param topP
+ * @text Top P
+ * @desc 核采样概率阈值(0-1)，控制输出多样性
+ * @type number
+ * @min 0
+ * @max 1
+ * @decimals 2
+ * @default 1.0
  * 
  * @param maxTokens
  * @text 最大Token数
@@ -172,6 +181,12 @@
  * @desc 不翻译的文本正则(用|分隔)
  * @type string
  * @default \\i\\[\\d+\\]|^\\$|^[0-9]+$
+ * 
+ * @param mtoolFile
+ * @text MTOOL翻译文件/目录
+ * @desc MTOOL格式翻译文件路径或目录(如: translations/zh.json 或 translations/zh/)
+ * @type string
+ * @default 
  */
 
 (function() {
@@ -215,6 +230,7 @@
         apiUrl: params.apiUrl || 'https://api.siliconflow.cn/v1/chat/completions',
         model: params.model || 'Qwen/Qwen2.5-7B-Instruct',
         temperature: parseFloat(params.temperature) || 0.3,
+        topP: parseFloat(params.topP) || 1.0,
         maxTokens: parseInt(params.maxTokens) || 1000
     };
     
@@ -225,7 +241,8 @@
         contextWindow: parseInt(params.contextWindow) || 10,
         translateUI: params.translateUI !== 'false',
         translateDialogue: params.translateDialogue !== 'false',
-        translateSystemText: params.translateSystemText === 'true'
+        translateSystemText: params.translateSystemText === 'true',
+        mtoolFile: params.mtoolFile || ''
     };
     
     const uiConfig = {
@@ -308,30 +325,129 @@
         saveCache(cacheMap, stats) {
             if (!this._fs) return;
             try {
-                // 将缓存转换为数组格式，便于阅读和编辑
-                const cacheArray = [];
+                // 将缓存转换为MTOOL格式 {"原文": "译文"}
+                const mtoolFormat = {};
                 for (const [key, value] of cacheMap) {
                     // key 格式: 原文前缀|hash|语言
                     const parts = key.split('|');
                     const original = parts[0];
-                    cacheArray.push({
-                        original: original,
-                        translated: value,
-                        key: key
-                    });
+                    mtoolFormat[original] = value;
                 }
                 const data = {
-                    version: 2,
+                    version: 3,
                     timestamp: Date.now(),
                     provider: apiConfig.provider,
                     targetLanguage: translationConfig.targetLanguage,
                     stats: stats,
-                    cache: cacheArray
+                    cache: mtoolFormat
                 };
                 this._fs.writeFileSync(this._cacheFile, JSON.stringify(data, null, 2), 'utf8');
             } catch (e) {
                 console.error('[LLMTranslator] 保存缓存失败:', e.message);
             }
+        }
+        
+        // 加载MTOOL格式翻译文件 {"原文": "译文"}
+        // 支持加载单个文件或整个目录，目录内文件按字母顺序加载，后覆盖前
+        loadMtoolFile(filePath) {
+            if (!this._fs) return null;
+            try {
+                const basePath = window.location.pathname.replace(/(\/www|\/)[^\/]*$/, '');
+                const decodedPath = decodeURIComponent(basePath).replace(/^\/([A-Za-z]:)/, '$1');
+                const fullPath = this._path.join(decodedPath, filePath);
+                
+                // 检查路径是否存在
+                if (!this._fs.existsSync(fullPath)) {
+                    return null;
+                }
+                
+                const stats = this._fs.statSync(fullPath);
+                
+                // 如果是目录，加载目录下所有JSON文件
+                if (stats.isDirectory()) {
+                    return this._loadMtoolDirectory(fullPath);
+                }
+                
+                // 如果是单个文件，直接加载
+                return this._loadMtoolSingleFile(fullPath);
+            } catch (e) {
+                console.error('[LLMTranslator] 加载MTOOL文件失败:', e.message);
+            }
+            return null;
+        }
+        
+        // 加载单个MTOOL文件
+        _loadMtoolSingleFile(fullPath) {
+            try {
+                const data = this._fs.readFileSync(fullPath, 'utf8');
+                const parsed = JSON.parse(data);
+                return this._parseMtoolData(parsed);
+            } catch (e) {
+                console.error('[LLMTranslator] 解析MTOOL文件失败:', fullPath, e.message);
+            }
+            return null;
+        }
+        
+        // 加载整个目录的MTOOL文件
+        _loadMtoolDirectory(dirPath) {
+            try {
+                const files = this._fs.readdirSync(dirPath)
+                    .filter(file => file.endsWith('.json'))
+                    .sort(); // 按字母顺序排序
+                
+                const mergedTranslations = {};
+                let loadedCount = 0;
+                
+                for (const file of files) {
+                    const filePath = this._path.join(dirPath, file);
+                    const fileStats = this._fs.statSync(filePath);
+                    
+                    if (fileStats.isFile()) {
+                        const data = this._fs.readFileSync(filePath, 'utf8');
+                        const parsed = JSON.parse(data);
+                        const translations = this._parseMtoolData(parsed);
+                        
+                        if (translations) {
+                            // 合并翻译，后面的覆盖前面的
+                            for (const [key, value] of Object.entries(translations)) {
+                                if (mergedTranslations.hasOwnProperty(key)) {
+                                    // 重复的键，后面覆盖前面
+                                    if (this._debugMode) {
+                                        console.log(`[LLMTranslator] 重复翻译 [${key}]: "${mergedTranslations[key]}" → "${value}"`);
+                                    }
+                                }
+                                mergedTranslations[key] = value;
+                            }
+                            loadedCount++;
+                        }
+                    }
+                }
+                
+                console.log(`[LLMTranslator] 从目录加载了 ${loadedCount} 个MTOOL文件，共 ${Object.keys(mergedTranslations).length} 条翻译`);
+                return mergedTranslations;
+            } catch (e) {
+                console.error('[LLMTranslator] 加载MTOOL目录失败:', dirPath, e.message);
+            }
+            return null;
+        }
+        
+        // 解析MTOOL数据（支持多种格式）
+        _parseMtoolData(parsed) {
+            // 支持纯MTOOL格式 {"原文": "译文"} 或带元数据的格式
+            if (parsed.version === 3 && parsed.cache) {
+                return parsed.cache;
+            } else if (parsed.version === 2 && Array.isArray(parsed.cache)) {
+                // 版本2转MTOOL格式
+                const mtoolFormat = {};
+                for (const item of parsed.cache) {
+                    mtoolFormat[item.original] = item.translated;
+                }
+                return mtoolFormat;
+            } else if (typeof parsed === 'object' && parsed !== null) {
+                // 纯MTOOL格式
+                return parsed;
+            }
+            return null;
         }
         
         clearCache() {
@@ -358,6 +474,8 @@
     class LLMTranslatorService {
         constructor() {
             this._cache = new Map();
+            this._mtoolTranslations = {}; // MTOOL格式翻译字典 {"原文": "译文"}
+            this._useMtool = false;
             this._contextQueue = [];
             this._pendingRequests = new Map();
             this._isTranslating = false;
@@ -371,7 +489,33 @@
             };
             this._storage = new TranslationStorage();
             this._loadCacheFromFile();
+            this._loadMtoolTranslations();
             this._initProvider();
+        }
+        
+        // 加载MTOOL格式翻译文件
+        _loadMtoolTranslations() {
+            // 优先使用用户配置的mtoolFile路径
+            if (translationConfig.mtoolFile) {
+                const mtoolData = this._storage.loadMtoolFile(translationConfig.mtoolFile);
+                if (mtoolData) {
+                    this._mtoolTranslations = mtoolData;
+                    this._useMtool = true;
+                    const keys = Object.keys(mtoolData);
+                    console.log(`[LLMTranslator] 已加载MTOOL翻译: ${keys.length} 条记录`);
+                    return;
+                }
+            }
+            
+            // 如果未配置或加载失败，尝试默认路径 translation_cache/${targetLanguage}/
+            const defaultPath = `translation_cache/${translationConfig.targetLanguage}`;
+            const mtoolData = this._storage.loadMtoolFile(defaultPath);
+            if (mtoolData) {
+                this._mtoolTranslations = mtoolData;
+                this._useMtool = true;
+                const keys = Object.keys(mtoolData);
+                console.log(`[LLMTranslator] 已加载MTOOL翻译(默认路径): ${keys.length} 条记录`);
+            }
         }
         
         _loadCacheFromFile() {
@@ -549,6 +693,7 @@
                 model: apiConfig.model,
                 messages: messages,
                 temperature: apiConfig.temperature,
+                top_p: apiConfig.topP,
                 max_tokens: apiConfig.maxTokens
             };
         }
@@ -654,6 +799,18 @@
                 return text;
             }
             
+            // 优先使用MTOOL翻译
+            if (this._useMtool && this._mtoolTranslations.hasOwnProperty(text)) {
+                this._stats.cacheHits++;
+                const translated = this._mtoolTranslations[text];
+                if (this._debugMode) {
+                    console.log('[LLMTranslator] MTOOL命中!');
+                    console.log('  原文:', text?.substring(0, 40));
+                    console.log('  译文:', translated?.substring(0, 40));
+                }
+                return translated;
+            }
+            
             const cacheKey = this._generateCacheKey(text);
             
             // 检查缓存
@@ -688,6 +845,17 @@
             const scene = SceneManager._scene;
             if (!scene) return;
             
+            // 调用场景的刷新方法（如果存在）
+            if (scene._refreshAllWindows && typeof scene._refreshAllWindows === 'function') {
+                scene._refreshAllWindows();
+            } else {
+                // 兼容模式：遍历所有子元素刷新
+                this._refreshAllWindowsCompat(scene);
+            }
+        }
+        
+        // 兼容模式刷新（原实现）
+        _refreshAllWindowsCompat(scene) {
             // 刷新消息窗口
             if (scene._messageWindow && scene._messageWindow._forceUpdateMessageText) {
                 scene._messageWindow._forceUpdateMessageText();
@@ -706,6 +874,26 @@
                     }
                 }
             }
+        }
+        
+        // 导出为MTOOL格式 {"原文": "译文"}
+        exportToMtoolFormat() {
+            const mtoolFormat = {};
+            for (const [key, value] of this._cache) {
+                const parts = key.split('|');
+                const original = parts[0];
+                mtoolFormat[original] = value;
+            }
+            return mtoolFormat;
+        }
+        
+        // 获取MTOOL翻译状态
+        getMtoolStatus() {
+            return {
+                useMtool: this._useMtool,
+                mtoolFile: translationConfig.mtoolFile,
+                mtoolCount: Object.keys(this._mtoolTranslations).length
+            };
         }
         
         async translateAsync(text) {
@@ -1005,6 +1193,31 @@
         }
     };
     
+    // 扩展 Scene_Base 来支持窗口刷新
+    const _Scene_Base_create = Scene_Base.prototype.create;
+    Scene_Base.prototype.create = function() {
+        _Scene_Base_create.call(this);
+        // 添加刷新所有窗口的方法
+        this._refreshAllWindows = function() {
+            // 刷新消息窗口
+            if (this._messageWindow && this._messageWindow._forceUpdateMessageText) {
+                this._messageWindow._forceUpdateMessageText();
+            }
+            
+            // 刷新姓名框
+            if (this._nameBoxWindow) {
+                this._nameBoxWindow.refresh();
+            }
+            
+            // 刷新所有子窗口
+            this.children.forEach(function(child) {
+                if (child.refresh && typeof child.refresh === 'function' && !(child instanceof Window_Message)) {
+                    child.refresh();
+                }
+            });
+        };
+    };
+    
     //========================================================================
     // 快捷键
     //========================================================================
@@ -1044,18 +1257,25 @@
     // 启动日志
     //========================================================================
     const status = $llmTranslator.getStatus();
+    const mtoolStatus = $llmTranslator.getMtoolStatus();
     console.log('%c[LLMTranslator] 插件已加载', 'color: #00FF00; font-weight: bold');
     console.log('[LLMTranslator] 状态:', status.isReady ? '✓ 就绪' : '✗ 未就绪(API密钥未配置)');
     console.log('[LLMTranslator] 提供商:', status.provider);
     console.log('[LLMTranslator] 缓存:', status.cacheSize, '条');
+    console.log('[LLMTranslator] Top P:', apiConfig.topP);
+    if (mtoolStatus.useMtool) {
+        console.log('[LLMTranslator] ✓ MTOOL翻译:', mtoolStatus.mtoolFile, `(${mtoolStatus.mtoolCount} 条)`);
+    } else if (translationConfig.mtoolFile) {
+        console.log('[LLMTranslator] ⚠ MTOOL文件未找到:', translationConfig.mtoolFile);
+    }
     if (systemPromptFromFile) {
         console.log('[LLMTranslator] ✓ 已加载外部提示词: js/plugins/prompt.txt');
     } else {
         console.log('[LLMTranslator] ℹ 使用默认提示词 (如需自定义请创建 js/plugins/prompt.txt)');
     }
     
-    if (!status.hasApiKey) {
-        console.warn('%c[LLMTranslator] 警告: 请在插件参数中设置API密钥!', 'color: #FF6600');
+    if (!status.hasApiKey && !mtoolStatus.useMtool) {
+        console.warn('%c[LLMTranslator] 警告: 请在插件参数中设置API密钥或配置MTOOL文件!', 'color: #FF6600');
     }
     
     // 控制台命令
@@ -1066,5 +1286,12 @@
         console.log('[LLMTranslator] 测试:', text);
         console.log('[LLMTranslator] 结果:', $llmTranslator.translate(text));
     };
+    window.llmExportMtool = () => {
+        const mtoolData = $llmTranslator.exportToMtoolFormat();
+        console.log('[LLMTranslator] MTOOL格式翻译数据:', mtoolData);
+        console.log('[LLMTranslator] 条目数:', Object.keys(mtoolData).length);
+        return mtoolData;
+    };
+    window.llmMtoolStatus = () => console.table($llmTranslator.getMtoolStatus());
     
 })();
