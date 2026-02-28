@@ -619,6 +619,12 @@
             if (!text || typeof text !== 'string') return true;
             if (text.trim().length === 0) return true;
             
+            // 检查是否为代码（防止翻译代码浪费token）
+            if (this._isCode(text)) {
+                if (this._debugMode) console.log('[LLMTranslator] 代码跳过:', text.substring(0, 30));
+                return true;
+            }
+            
             for (const pattern of blacklist) {
                 try {
                     const regex = new RegExp(pattern);
@@ -627,6 +633,87 @@
                     if (text.includes(pattern)) return true;
                 }
             }
+            return false;
+        }
+        
+        // 检测文本是否为代码或不需要翻译的内容
+        // 返回 true 表示是代码，跳过翻译
+        _isCode(text) {
+            const trimmed = text.trim();
+            
+            // 1. 纯RPG Maker控制字符（只有控制符没有实际文本）
+            // 匹配如：\i[123], \c[2], \n[1], \v[5], \p[1], \g, \., \|, \!, \<, \>, \^
+            const controlCharPattern = /^\\[icnvpgICNVPG]\[\d+\]$/;
+            const simpleControlPattern = /^\\[\.\|!<>\^]$/;
+            if (controlCharPattern.test(trimmed) || simpleControlPattern.test(trimmed)) {
+                return true;
+            }
+            
+            // 2. 去除所有RPG Maker控制字符后只剩空白
+            // 控制符包括：\i[n], \c[n], \n[n], \v[n], \p[n], \g, \$, \., \|, \!, \<, \>, \^, \{, \}
+            const textWithoutControls = trimmed
+                .replace(/\\[icnvpgICNVPG]\[\d+\]/g, '')  // \i[123], \c[2], etc.
+                .replace(/\\[$\.\|!<>\^\{\}]/g, '')       // \$, \., \|, etc.
+                .replace(/\\\\/g, '')                     // \\
+                .trim();
+            if (textWithoutControls.length === 0) {
+                return true;
+            }
+            
+            // 3. 只有标点符号和特殊字符（没有实际文字）
+            // 排除常见标点：。！？、，．：；（）（）［］｛｝「」『』""''【】・…—～
+            const punctuationOnlyPattern = /^[\s\p{P}\p{S}]*$/u;
+            if (punctuationOnlyPattern.test(textWithoutControls)) {
+                return true;
+            }
+            
+            // 4. 文件路径（包含目录分隔符和文件扩展名）
+            const filePathPattern = /^(?:[A-Za-z]:)?[\\\/].*\.[a-zA-Z0-9]{2,6}$/;
+            if (filePathPattern.test(trimmed)) {
+                return true;
+            }
+            
+            // 5. JavaScript代码片段特征
+            // 函数定义、变量赋值、对象字面量、数组等
+            const jsPatterns = [
+                /^\s*function\s*\w*\s*\(/,           // function name(
+                /^\s*var\s+\w+\s*[=;]/,             // var x =
+                /^\s*let\s+\w+\s*[=;]/,             // let x =
+                /^\s*const\s+\w+\s*[=;]/,           // const x =
+                /^\s*if\s*\(.*\)\s*\{?/,            // if () {
+                /^\s*for\s*\(.*\)\s*\{?/,          // for () {
+                /^\s*while\s*\(.*\)\s*\{?/,         // while () {
+                /^\s*\w+\s*[=\+\-]\s*\d+/,         // x = 123
+                /^\s*\{[\s\S]*\}\s*$/,              // { ... }
+                /^\s*\[[\s\S]*\]\s*$/,              // [ ... ]
+                /^\s*\/\/.*$/,                      // // comment
+                /^\s*\/\*[\s\S]*\*\/\s*$/          // /* comment */
+            ];
+            for (const pattern of jsPatterns) {
+                if (pattern.test(trimmed)) {
+                    return true;
+                }
+            }
+            
+            // 6. 只有HTML/XML标签
+            const htmlTagPattern = /^\s*<\/?[\w\-]+(?:\s+[^>]*)?>\s*$/;
+            if (htmlTagPattern.test(trimmed)) {
+                return true;
+            }
+            
+            // 7. 只有URL
+            const urlPattern = /^https?:\/\/[^\s]+$/i;
+            if (urlPattern.test(trimmed)) {
+                return true;
+            }
+            
+            // 8. 只有UUID、GUID或哈希值
+            const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+            const hashPattern = /^[0-9a-f]{32,64}$/i;
+            if (uuidPattern.test(trimmed) || hashPattern.test(trimmed)) {
+                return true;
+            }
+            
             return false;
         }
         

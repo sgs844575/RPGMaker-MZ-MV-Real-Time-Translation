@@ -156,6 +156,22 @@ Import pre-translated files in MTOOL format `{"原文": "译文"}`:
    llmMtoolStatus()  // Check MTOOL status
    ```
 
+### Code Detection (Auto Skip)
+
+The plugin automatically detects and skips the following content types to save API tokens:
+
+| Type | Example | Description |
+|------|---------|-------------|
+| RPG Maker Control Codes | `\i[123]`, `\c[2]`, `\n[1]` | Icon, color, name, variable references |
+| Pure Punctuation | `...`, `!?`, `——` | Only symbols without actual text |
+| File Paths | `C:\\game\\img.png`, `/usr/bin/node` | System paths |
+| JavaScript Code | `function(){}`, `var x = 1` | Script snippets |
+| HTML/XML Tags | `<div>`, `<br/>` | Markup tags only |
+| URLs | `https://example.com` | Web links |
+| UUID/Hash | `550e8400-e29b-41d4...` | Unique identifiers |
+
+When debug mode is enabled (`llmDebug()`), skipped code will be logged to console.
+
 ### Console Commands
 
 During gameplay, press `F12` and type:
@@ -171,6 +187,7 @@ llmTest("text") // Test translation
 2. **Pre-translate** - Play through once to generate cache, then distribute the cache file
 3. **Use Cheaper Models** - Qwen2.5-7B is sufficient for most translations
 4. **Adjust Context Window** - Smaller context = fewer tokens = lower cost
+5. **Auto Code Detection** - Automatically skips code snippets, saving tokens
 
 ---
 
@@ -316,6 +333,22 @@ API配置:
    llmMtoolStatus()  // 查看MTOOL状态
    ```
 
+### 代码检测（自动跳过）
+
+插件自动检测并跳过以下内容类型，节省API Token：
+
+| 类型 | 示例 | 说明 |
+|------|------|------|
+| RPG Maker控制字符 | `\i[123]`, `\c[2]`, `\n[1]` | 图标、颜色、名字、变量引用 |
+| 纯标点符号 | `...`, `!?`, `——` | 只有符号没有实际文字 |
+| 文件路径 | `C:\\game\\img.png`, `/usr/bin/node` | 系统路径 |
+| JavaScript代码 | `function(){}`, `var x = 1` | 脚本片段 |
+| HTML/XML标签 | `<div>`, `<br/>` | 标记标签 |
+| URL | `https://example.com` | 网页链接 |
+| UUID/哈希 | `550e8400-e29b-41d4...` | 唯一标识符 |
+
+开启调试模式后（`llmDebug()`），跳过的代码将显示在控制台中。
+
 ### 控制台命令
 
 游戏中按 `F12` 打开控制台，输入：
@@ -331,6 +364,7 @@ llmTest("文本")  // 测试翻译
 2. **预翻译** - 完整游玩一遍生成缓存，然后分发缓存文件给其他玩家
 3. **使用便宜模型** - Qwen2.5-7B 对大多数翻译已经足够
 4. **调整上下文窗口** - 上下文越小 = Token越少 = 费用越低
+5. **自动代码检测** - 自动跳过代码片段，节省Token
 
 ---
 
