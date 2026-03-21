@@ -1032,6 +1032,16 @@
     const _Window_Base_drawTextEx = Window_Base.prototype.drawTextEx;
     const _Window_Message_startMessage = Window_Message.prototype.startMessage;
     const _Window_NameBox_start = Window_NameBox.prototype.start;
+    const _Window_ScrollText_startMessage = Window_ScrollText.prototype.startMessage;
+    const _Window_ScrollText_refresh = Window_ScrollText.prototype.refresh;
+    
+    const _Scene_Map_update = Scene_Map.prototype.update;
+    const _Scene_Battle_update = Scene_Battle.prototype.update;
+    
+    const _Window_Base_refresh = Window_Base.prototype.refresh;
+    
+    // 待翻译文本队列（用于异步翻译后的刷新）
+    const _pendingTranslations = new Map();
     
     function shouldTranslateWindow(win) {
         if (!$llmTranslator.isEnabled()) return false;
@@ -1042,8 +1052,19 @@
         if (win instanceof Window_NameBox) {
             return translationConfig.translateDialogue;
         }
+        if (win instanceof Window_ScrollText) {
+            return translationConfig.translateDialogue;
+        }
         return translationConfig.translateUI;
     }
+    
+    // 存储窗口待翻译文本的Map（用于异步翻译后重新绘制）
+    const _Window_Base_initialize = Window_Base.prototype.initialize;
+    Window_Base.prototype.initialize = function(rect) {
+        _Window_Base_initialize.call(this, rect);
+        this._translationCache = new Map();
+        this._needsRefresh = false;
+    };
     
     Window_Base.prototype.drawText = function(text, x, y, maxWidth, align) {
         if (shouldTranslateWindow(this) && typeof text === 'string') {
@@ -1052,6 +1073,12 @@
                 console.log('[LLMTranslator.drawText]');
                 console.log('  原文:', text.substring(0, 30));
                 console.log('  译文:', translated.substring(0, 30));
+            }
+            // 缓存原文到译文映射，用于后续刷新
+            if (text !== translated) {
+                if (!this._translationCache) this._translationCache = new Map();
+                this._translationCache.set(text, { translated: translated, x: x, y: y, maxWidth: maxWidth, align: align, type: 'drawText' });
+                this._needsRefresh = true;
             }
             _Window_Base_drawText.call(this, translated, x, y, maxWidth, align);
             return;
@@ -1067,9 +1094,35 @@
                 console.log('  原文:', text.substring(0, 30));
                 console.log('  译文:', translated.substring(0, 30));
             }
+            // 缓存原文到译文映射，用于后续刷新
+            if (text !== translated) {
+                if (!this._translationCache) this._translationCache = new Map();
+                this._translationCache.set(text, { translated: translated, x: x, y: y, width: width, type: 'drawTextEx' });
+                this._needsRefresh = true;
+            }
             return _Window_Base_drawTextEx.call(this, translated, x, y, width);
         }
         return _Window_Base_drawTextEx.call(this, text, x, y, width);
+    };
+    
+    Window_Base.prototype.refresh = function() {
+        const needsTranslationRefresh = this._needsRefresh && this._translationCache && this._translationCache.size > 0;
+        
+        _Window_Base_refresh.call(this);
+        
+        if (needsTranslationRefresh) {
+            const cached = this._translationCache;
+            this._translationCache = new Map();
+            this._needsRefresh = false;
+            
+            for (const [original, data] of cached) {
+                if (data.type === 'drawText') {
+                    _Window_Base_drawText.call(this, data.translated, data.x, data.y, data.maxWidth, data.align);
+                } else if (data.type === 'drawTextEx') {
+                    _Window_Base_drawTextEx.call(this, data.translated, data.x, data.y, data.width);
+                }
+            }
+        }
     };
     
     Window_Message.prototype.startMessage = function() {
@@ -1097,7 +1150,7 @@
                 this._originalMessageText = originalText;
                 
                 $llmTranslator.translateAsync(originalText).then(translated => {
-                    if (translated !== originalText && this.isOpen()) {
+                    if (translated !== originalText && this.isOpen() && this.isOpen()) {
                         // 更新游戏消息文本
                         $gameMessage._texts = translated.split('\n');
                         
@@ -1120,7 +1173,18 @@
     Window_Message.prototype._forceUpdateMessageText = function() {
         if ($llmTranslator._debugMode) {
             console.log('[LLMTranslator] 强制更新消息文本');
+            console.log('[LLMTranslator] 消息内容:', $gameMessage.allText().substring(0, 50));
         }
+        
+        if (!this.isOpen()) {
+            if ($llmTranslator._debugMode) {
+                console.log('[LLMTranslator] 窗口未打开，延迟刷新');
+            }
+            this._pendingForceUpdate = true;
+            return;
+        }
+        
+        this._pendingForceUpdate = false;
         
         // 设置标志，避免重新触发翻译
         this._skipTranslationCheck = true;
@@ -1134,8 +1198,77 @@
         this.contents.clear();
         if (this.contentsBack) this.contentsBack.clear();
         
+        // 如果有子窗口活动，等待它们关闭
+        if (this.isAnySubWindowActive()) {
+            if ($llmTranslator._debugMode) {
+                console.log('[LLMTranslator] 子窗口活动，等待后刷新');
+            }
+            return;
+        }
+        
         // 重新开始消息（此时会读取已翻译的文本，且跳过翻译检查）
-        this.startMessage();
+        _Window_Message_startMessage.call(this);
+    };
+    
+    // 重写update以处理延迟刷新
+    const _Window_Message_update = Window_Message.prototype.update;
+    Window_Message.prototype.update = function() {
+        _Window_Message_update.call(this);
+        
+        if (this._pendingForceUpdate && this.isOpen() && !this.isAnySubWindowActive()) {
+            if ($llmTranslator._debugMode) {
+                console.log('[LLMTranslator] 执行延迟的消息刷新');
+            }
+            this._forceUpdateMessageText();
+        }
+    };
+    
+    // Window_ScrollText 支持
+    Window_ScrollText.prototype.startMessage = function() {
+        if (shouldTranslateWindow(this) && !this._skipScrollTextTranslation) {
+            this._originalScrollText = $gameMessage.allText();
+            
+            const cacheKey = $llmTranslator._generateCacheKey(this._originalScrollText);
+            if (translationConfig.enableCache && $llmTranslator._cache.has(cacheKey)) {
+                const translated = $llmTranslator._cache.get(cacheKey);
+                if (translated !== this._originalScrollText) {
+                    this._text = translated;
+                }
+            } else {
+                $llmTranslator.translateAsync(this._originalScrollText).then(translated => {
+                    if (translated !== this._originalScrollText && this._text) {
+                        this._text = translated;
+                        if (this.isVisible()) {
+                            this.refresh();
+                        }
+                    }
+                });
+            }
+        }
+        
+        this._skipScrollTextTranslation = false;
+        _Window_ScrollText_startMessage.call(this);
+    };
+    
+    Window_ScrollText.prototype.refresh = function() {
+        if (this._text) {
+            const rect = this.baseTextRect();
+            const y = rect.y - this._scrollY + (this._scrollY % this._blockHeight);
+            this.contents.clear();
+            
+            // 检查是否需要翻译
+            if (shouldTranslateWindow(this)) {
+                const cacheKey = $llmTranslator._generateCacheKey(this._originalScrollText || '');
+                if (translationConfig.enableCache && $llmTranslator._cache.has(cacheKey)) {
+                    const translated = $llmTranslator._cache.get(cacheKey);
+                    this.drawTextEx(translated, rect.x, y, rect.width);
+                } else {
+                    this.drawTextEx(this._text, rect.x, y, rect.width);
+                }
+            } else {
+                this.drawTextEx(this._text, rect.x, y, rect.width);
+            }
+        }
     };
     
     Window_NameBox.prototype.start = function() {
@@ -1151,6 +1284,26 @@
             }
         }
         _Window_NameBox_start.call(this);
+    };
+    
+    // 为 Scene_Map 和 Scene_Battle 添加每帧刷新检查
+    Scene_Map.prototype.update = function() {
+        _Scene_Map_update.call(this);
+        this._checkTranslationRefresh();
+    };
+    
+    Scene_Battle.prototype.update = function() {
+        _Scene_Battle_update.call(this);
+        this._checkTranslationRefresh();
+    };
+    
+    Scene_Base.prototype._checkTranslationRefresh = function() {
+        // 检查是否需要刷新消息窗口
+        if (this._messageWindow && this._messageWindow._pendingForceUpdate) {
+            if (this._messageWindow.isOpen() && !this._messageWindow.isAnySubWindowActive()) {
+                this._messageWindow._forceUpdateMessageText();
+            }
+        }
     };
     
     //========================================================================
